@@ -1,7 +1,7 @@
 
-import React, { useState } from 'react';
-import { motion } from 'framer-motion';
-import { Dices, Play, Users, Trophy, LogOut } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Dices, Play, Users, Trophy, LogOut, AlertCircle } from 'lucide-react';
 import { Button } from './Button';
 import { socketService } from '../services/socketService';
 import { SocketEvents } from '../types';
@@ -15,8 +15,27 @@ export const Lobby: React.FC<LobbyProps> = ({ onLogout }) => {
   const [roomId, setRoomId] = useState('');
   const [mode, setMode] = useState<'menu' | 'join'>('menu');
   const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   
   const currentUser = socketService.currentUser;
+
+  useEffect(() => {
+    // Listen for connection errors
+    const handleError = (data: { message: string }) => {
+        setError(data.message);
+        setIsJoining(false);
+    };
+
+    socketService.on(SocketEvents.CONNECT_ERROR, handleError);
+    // Also listen for regular ERROR
+    socketService.on(SocketEvents.ERROR, handleError);
+
+    return () => {
+        socketService.off(SocketEvents.CONNECT_ERROR, handleError);
+        socketService.off(SocketEvents.ERROR, handleError);
+    };
+  }, []);
 
   const handleCreate = () => {
     socketService.emit(SocketEvents.CREATE_MATCH, { playerName: currentUser?.name });
@@ -24,6 +43,8 @@ export const Lobby: React.FC<LobbyProps> = ({ onLogout }) => {
 
   const handleJoin = () => {
     if (!roomId) return;
+    setError(null);
+    setIsJoining(true);
     socketService.emit(SocketEvents.JOIN_MATCH, { roomId, playerName: currentUser?.name });
   };
 
@@ -86,15 +107,35 @@ export const Lobby: React.FC<LobbyProps> = ({ onLogout }) => {
                 <input
                   type="text"
                   value={roomId}
-                  onChange={(e) => setRoomId(e.target.value)}
-                  placeholder="e.g. ROOM_X92"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                  onChange={(e) => {
+                      setRoomId(e.target.value);
+                      setError(null);
+                  }}
+                  placeholder="e.g. 4521"
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-lg tracking-wider text-center uppercase"
                   autoFocus
                 />
               </div>
+
+              <AnimatePresence>
+                {error && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 flex items-start gap-2 overflow-hidden"
+                  >
+                    <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                    <p className="text-sm text-rose-200 font-medium leading-tight">{error}</p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               <div className="grid grid-cols-2 gap-3">
-                <Button variant="secondary" onClick={() => setMode('menu')}>Cancel</Button>
-                <Button onClick={handleJoin} disabled={!roomId}>Join</Button>
+                <Button variant="secondary" onClick={() => setMode('menu')} disabled={isJoining}>Cancel</Button>
+                <Button onClick={handleJoin} disabled={!roomId || isJoining} isLoading={isJoining}>
+                   {isJoining ? 'Connecting...' : 'Join'}
+                </Button>
               </div>
             </motion.div>
           )}

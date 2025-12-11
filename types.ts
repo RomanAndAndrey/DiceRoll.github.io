@@ -27,25 +27,26 @@ export interface LeaderboardEntry {
   wins: number;
 }
 
-// Socket Events Protocol (matching the report)
+// Socket Events Protocol
 export enum SocketEvents {
   // Client -> Server
-  LOGIN_REQUEST = 'login_request', // New
+  LOGIN_REQUEST = 'login_request', 
   CREATE_MATCH = 'create_match',
   JOIN_MATCH = 'join_match',
   LEAVE_MATCH = 'leave_match',
   GET_LEADERBOARD = 'get_leaderboard',
-  LOGOUT = 'logout', // New
+  LOGOUT = 'logout', 
 
   // Server -> Client
-  LOGIN_SUCCESS = 'login_success', // New
-  LOGIN_FAIL = 'login_fail', // New
-  MATCH_CREATED = 'match_created', // Ack
+  LOGIN_SUCCESS = 'login_success', 
+  LOGIN_FAIL = 'login_fail', 
+  MATCH_CREATED = 'match_created', 
   MATCH_START = 'match_start',
   DICE_RESULT = 'dice_result',
   MATCH_END = 'match_end',
   LEADERBOARD_DATA = 'leaderboard_data',
   ERROR = 'error',
+  CONNECT_ERROR = 'connect_error', // New event for UI handling
 }
 
 export interface DiceResultPayload {
