@@ -1,6 +1,6 @@
 
 import { SocketEvents, DiceResultPayload, LeaderboardEntry, LoginPayload, Player, RoomStatus } from '../types';
-import { Peer, DataConnection } from 'peerjs';
+import { Peer, DataConnection, PeerOptions } from 'peerjs';
 
 type Listener = (data: any) => void;
 
@@ -8,6 +8,20 @@ interface NetworkMessage {
   type: string;
   payload: any;
 }
+
+// Configuration for NAT Traversal (STUN Servers)
+// This is critical for connecting users on different networks (e.g. WiFi vs 4G)
+const PEER_CONFIG: PeerOptions = {
+    debug: 2, // Errors and Warnings
+    config: {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
+    }
+};
 
 /**
  * P2P SOCKET SERVICE (WebRTC / PeerJS)
@@ -117,9 +131,8 @@ class P2PSocketService {
 
     console.log(`[Host] Creating room: ${shortCode} (${fullId})`);
 
-    this.peer = new Peer(fullId, {
-      debug: 1,
-    });
+    // Merge custom ID with default config
+    this.peer = new Peer(fullId, PEER_CONFIG);
 
     this.peer.on('open', (id) => {
       console.log('[Host] Peer Open:', id);
@@ -151,7 +164,14 @@ class P2PSocketService {
 
     this.peer.on('error', (err) => {
         console.error('[Host] Peer Error:', err);
-        alert('Could not create room. Try again.');
+        let msg = 'Could not create room.';
+        if (err.type === 'unavailable-id') {
+            msg = 'Room code collision. Please try again.';
+        } else if (err.type === 'network') {
+            msg = 'Network error. Check your internet.';
+        }
+        // We can define a simplified alert or trigger an error event
+        alert(msg);
     });
   }
 
@@ -167,14 +187,14 @@ class P2PSocketService {
     console.log(`[Guest] Attempting to connect to: ${fullTargetId}`);
 
     // Create our own peer first
-    this.peer = new Peer({ debug: 1 });
+    this.peer = new Peer(PEER_CONFIG);
 
     // Set a timeout to catch "hanging" connections
     this.connectionTimeout = setTimeout(() => {
         console.error('[Guest] Connection timed out');
-        this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Room might be closed.' });
+        this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Check code or internet.' });
         this.disconnect();
-    }, 8000); // 8 seconds timeout
+    }, 10000); // 10 seconds timeout
 
     this.peer.on('open', (myId) => {
       console.log('[Guest] My Peer ID:', myId);
@@ -212,6 +232,8 @@ class P2PSocketService {
       let msg = 'Connection failed';
       if (err.type === 'peer-unavailable') {
          msg = 'Room not found! Check code.';
+      } else if (err.type === 'network') {
+         msg = 'Network connection failed.';
       }
       this.trigger(SocketEvents.CONNECT_ERROR, { message: msg });
       this.disconnect(); // Cleanup
