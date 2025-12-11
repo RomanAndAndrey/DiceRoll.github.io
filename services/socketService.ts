@@ -1,89 +1,51 @@
 
 import { SocketEvents, DiceResultPayload, LeaderboardEntry, LoginPayload, Player, RoomStatus } from '../types';
+import { Peer, DataConnection } from 'peerjs';
 
 type Listener = (data: any) => void;
 
-interface UserData {
-  password?: string;
-  wins: number;
-}
-
-interface RoomData {
-  id: string;
-  hostId: string;
-  players: Player[];
-  status: RoomStatus;
-  lastRoll?: DiceResultPayload;
-  timestamp: number;
-}
-
-interface DB {
-  users: Record<string, UserData>;
-  rooms: Record<string, RoomData>;
+interface NetworkMessage {
+  type: string;
+  payload: any;
 }
 
 /**
- * LOCAL STORAGE P2P IMPLEMENTATION
+ * P2P SOCKET SERVICE (WebRTC / PeerJS)
  * 
- * Replaces the Bot simulation with a LocalStorage-based
- * sync mechanism allowing two tabs to play against each other.
+ * Enables real multiplayer between different devices/browsers.
+ * Host acts as the Server.
  */
-class MockSocketService {
+class P2PSocketService {
   private listeners: Record<string, Listener[]> = {};
-  private currentRoomId: string | null = null;
   
-  // Session State
+  // PeerJS State
+  private peer: Peer | null = null;
+  private conn: DataConnection | null = null;
+  private peerId: string | null = null;
+  private isHost: boolean = false;
+  
+  // App State
   public currentUser: { id: string; name: string } | null = null;
-  
-  // Game Loop State (Only active for Host)
-  private gameLoopTimeout: any = null;
+  private players: Player[] = [];
 
-  private readonly DB_KEY = 'duel_cubes_db';
-  private readonly SESSION_KEY = 'duel_cubes_session';
-  private readonly ROOMS_KEY = 'duel_cubes_rooms';
+  // Game Loop State (Host Only)
+  private gameLoopTimeout: any = null;
+  
+  // Prefix to avoid collisions on public PeerJS server
+  private readonly ID_PREFIX = 'dc-v1-'; 
 
   constructor() {
-    console.log('[System] Socket Service Initialized (P2P Mode)');
+    console.log('[System] P2P Service Initialized');
     this.restoreSession();
-    
-    // Listen for changes from OTHER tabs
-    window.addEventListener('storage', (e) => {
-      if (e.key === this.ROOMS_KEY && this.currentRoomId) {
-        this.syncRoomState();
-      }
-    });
   }
 
-  // --- Helpers ---
-  
-  private getDB(): DB {
-    const rawDB = localStorage.getItem(this.DB_KEY);
-    const rawRooms = localStorage.getItem(this.ROOMS_KEY);
-    
-    const db: DB = rawDB ? JSON.parse(rawDB) : { users: {} };
-    // Rooms are stored in a separate key to trigger storage events specifically for room updates
-    db.rooms = rawRooms ? JSON.parse(rawRooms) : {};
-    
-    return db;
-  }
-
-  private saveDB(db: DB) {
-    localStorage.setItem(this.DB_KEY, JSON.stringify({ users: db.users }));
-  }
-
-  private saveRooms(rooms: Record<string, RoomData>) {
-    localStorage.setItem(this.ROOMS_KEY, JSON.stringify(rooms));
-  }
-
+  // --- Session ---
   private restoreSession() {
-    const session = localStorage.getItem(this.SESSION_KEY);
+    const session = sessionStorage.getItem('dc_user');
     if (session) {
       try {
-        const user = JSON.parse(session);
-        this.currentUser = user;
-      } catch (e) {
-        localStorage.removeItem(this.SESSION_KEY);
-      }
+        this.currentUser = JSON.parse(session);
+      } catch(e) {}
     }
   }
 
@@ -98,9 +60,7 @@ class MockSocketService {
   }
 
   public on(event: string, callback: Listener) {
-    if (!this.listeners[event]) {
-      this.listeners[event] = [];
-    }
+    if (!this.listeners[event]) this.listeners[event] = [];
     this.listeners[event].push(callback);
   }
 
@@ -109,230 +69,201 @@ class MockSocketService {
     this.listeners[event] = this.listeners[event].filter(cb => cb !== callback);
   }
 
+  // Handle outgoing actions from UI
   public emit(event: string, payload: any) {
-    console.log(`[Client -> LocalServer] ${event}`, payload);
-    // Execute logic immediately
-    this.handleServerLogic(event, payload);
-  }
-
-  // --- Core Logic ---
-
-  private handleServerLogic(event: string, payload: any) {
-    const db = this.getDB();
+    console.log(`[UI Action] ${event}`, payload);
 
     switch (event) {
       case SocketEvents.LOGIN_REQUEST:
-        this.handleLogin(payload as LoginPayload, db);
+        this.handleLogin(payload);
         break;
-
       case SocketEvents.LOGOUT:
-        this.currentUser = null;
-        localStorage.removeItem(this.SESSION_KEY);
+        this.handleLogout();
         break;
-
-      case SocketEvents.GET_LEADERBOARD:
-        const sorted = Object.entries(db.users)
-          .sort(([, a], [, b]) => b.wins - a.wins)
-          .slice(0, 10)
-          .map(([name, data]) => ({ name, wins: data.wins }));
-        this.trigger(SocketEvents.LEADERBOARD_DATA, sorted);
-        break;
-
       case SocketEvents.CREATE_MATCH:
-        this.handleCreateMatch();
+        this.createHost();
         break;
-
       case SocketEvents.JOIN_MATCH:
-        this.handleJoinMatch(payload.roomId);
+        this.joinHost(payload.roomId);
         break;
-        
       case SocketEvents.LEAVE_MATCH:
-         this.handleLeaveMatch();
-         break;
+        this.disconnect();
+        break;
+      case SocketEvents.GET_LEADERBOARD:
+        // Mock data for P2P version (no persistent DB)
+        this.trigger(SocketEvents.LEADERBOARD_DATA, [
+            { name: "CyberKing", wins: 42 },
+            { name: "DiceMaster", wins: 38 },
+            { name: "LuckBox", wins: 15 }
+        ]);
+        break;
     }
   }
 
-  private handleLogin(payload: LoginPayload, db: DB) {
-    const { username, password } = payload;
-    
-    if (db.users[username]) {
-      const user = db.users[username];
-      if (user.password === password) {
-        this.currentUser = { id: `user_${username}`, name: username };
-        localStorage.setItem(this.SESSION_KEY, JSON.stringify(this.currentUser));
-        this.trigger(SocketEvents.LOGIN_SUCCESS, { user: this.currentUser });
-      } else {
-        this.trigger(SocketEvents.LOGIN_FAIL, { message: 'Incorrect password' });
-      }
-    } else {
-      db.users[username] = { password: password, wins: 0 };
-      this.saveDB(db);
-      this.currentUser = { id: `user_${username}`, name: username };
-      localStorage.setItem(this.SESSION_KEY, JSON.stringify(this.currentUser));
-      this.trigger(SocketEvents.LOGIN_SUCCESS, { user: this.currentUser });
-    }
-  }
-
-  // --- Room Management ---
-
-  private handleCreateMatch() {
-    if (!this.currentUser) return;
-    
-    const roomId = 'ROOM_' + Math.floor(1000 + Math.random() * 9000);
-    this.currentRoomId = roomId;
-
-    const db = this.getDB();
-    const newRoom: RoomData = {
-      id: roomId,
-      hostId: this.currentUser.id,
-      players: [{ 
-        id: this.currentUser.id, 
-        name: this.currentUser.name, 
-        score: 0, 
-        isSelf: true // This is just for local ref, overwritten on read
-      }],
-      status: RoomStatus.PENDING,
-      timestamp: Date.now()
-    };
-
-    db.rooms[roomId] = newRoom;
-    this.saveRooms(db.rooms);
-
-    this.trigger(SocketEvents.MATCH_CREATED, { roomId });
-  }
-
-  private handleJoinMatch(roomId: string) {
-    if (!this.currentUser) return;
-    
-    // Normalize input
-    const cleanId = roomId.trim().toUpperCase();
-    const db = this.getDB();
-    const room = db.rooms[cleanId];
-
-    if (!room) {
-      alert("Room not found!"); // Simple feedback
-      return;
-    }
-
-    if (room.players.length >= 2) {
-      alert("Room is full!");
-      return;
-    }
-
-    // Add Player
-    room.players.push({
-      id: this.currentUser.id,
-      name: this.currentUser.name,
-      score: 0,
-      isSelf: true
-    });
-    room.status = RoomStatus.ACTIVE;
-    
-    db.rooms[cleanId] = room;
-    this.saveRooms(db.rooms); // This triggers 'storage' event for Host
-
-    this.currentRoomId = cleanId;
-    
-    // Trigger start for Joiner immediately
-    this.syncRoomState();
-  }
-
-  private handleLeaveMatch() {
-    if (this.currentRoomId) {
-      const db = this.getDB();
-      if (db.rooms[this.currentRoomId]) {
-        // In a real app we would remove player, here we just delete room to keep it simple
-        delete db.rooms[this.currentRoomId];
-        this.saveRooms(db.rooms);
-      }
-    }
-    this.stopGameLoop();
-    this.currentRoomId = null;
-  }
-
-  // --- Synchronization & Game Loop ---
+  // --- Core P2P Logic ---
 
   /**
-   * Called when 'storage' event fires OR when we locally update the room.
-   * Reads state from LS and updates the UI.
+   * HOST: Creates a new Peer with a specific short code ID.
    */
-  private syncRoomState() {
-    if (!this.currentRoomId) return;
+  private createHost() {
+    if (!this.currentUser) return;
+    this.isHost = true;
+    
+    // Generate a 4 digit code
+    const shortCode = Math.floor(1000 + Math.random() * 9000).toString();
+    const fullId = this.ID_PREFIX + shortCode;
 
-    const db = this.getDB();
-    const room = db.rooms[this.currentRoomId];
+    this.peer = new Peer(fullId, {
+      debug: 1,
+    });
 
-    if (!room) {
-      // Room was deleted
-      this.trigger(SocketEvents.MATCH_END, { winnerId: null });
-      this.currentRoomId = null;
-      return;
-    }
+    this.peer.on('open', (id) => {
+      console.log('Host Open:', id);
+      this.peerId = id;
+      
+      // Initialize Host Player
+      this.players = [{
+        id: this.currentUser!.id,
+        name: this.currentUser!.name,
+        score: 0,
+        isSelf: true
+      }];
 
-    // Determine current user context
-    const myId = this.currentUser?.id;
-    const isHost = room.hostId === myId;
+      this.trigger(SocketEvents.MATCH_CREATED, { roomId: shortCode });
+    });
 
-    // Trigger Match Start if we have 2 players
-    if (room.players.length === 2) {
-      this.trigger(SocketEvents.MATCH_START, {
-        roomId: room.id,
-        players: room.players
+    this.peer.on('connection', (conn) => {
+      console.log('Host: Connection received');
+      this.conn = conn;
+      this.setupConnectionHandlers(conn);
+    });
+
+    this.peer.on('error', (err) => {
+        console.error('Peer Error:', err);
+        // If ID is taken, retry? For now, just error.
+        alert('Connection Error: ' + err.type);
+    });
+  }
+
+  /**
+   * GUEST: Connects to an existing Host ID.
+   */
+  private joinHost(shortCode: string) {
+    if (!this.currentUser) return;
+    this.isHost = false;
+
+    const fullTargetId = this.ID_PREFIX + shortCode.trim();
+
+    // Guest gets a random ID
+    this.peer = new Peer({ debug: 1 });
+
+    this.peer.on('open', () => {
+      // Connect to Host
+      const conn = this.peer!.connect(fullTargetId);
+      this.conn = conn;
+
+      conn.on('open', () => {
+        console.log('Guest: Connected to Host');
+        // Send our info to Host
+        this.send({
+          type: 'JOIN_REQUEST',
+          payload: { 
+            id: this.currentUser!.id, 
+            name: this.currentUser!.name 
+          }
+        });
       });
 
-      // If there is a new roll result in the storage that we haven't seen?
-      // Actually, we just pass the result. The UI handles "isRolling".
-      if (room.lastRoll) {
-        // Check if this is a NEW roll based on timestamp or just current state?
-        // For simplicity, we just trigger it. The UI debounces.
-        this.trigger(SocketEvents.DICE_RESULT, room.lastRoll);
-        
-        // Check win
-        if (room.lastRoll.winnerId) {
-            // Wait a bit then end
-            setTimeout(() => {
-                 this.trigger(SocketEvents.MATCH_END, { winnerId: room.lastRoll!.winnerId });
-                 if (isHost) this.stopGameLoop();
-            }, 2000);
-            return;
-        }
-      }
+      this.setupConnectionHandlers(conn);
+    });
 
-      // If I am Host and no roll is happening, start the loop
-      if (isHost && !this.gameLoopTimeout && !room.lastRoll?.winnerId) {
-         // If it's a fresh game or we need a re-roll
-         this.startGameLoop();
+    this.peer.on('error', (err: any) => {
+      console.error('Peer Error:', err);
+      if (err.type === 'peer-unavailable') {
+         alert('Room not found! Check the code.');
+      } else {
+         alert('Connection Error: ' + err.type);
       }
-    }
+      this.disconnect();
+    });
   }
 
-  // --- Host-Authoritative Game Loop ---
-
-  private startGameLoop() {
+  private disconnect() {
     this.stopGameLoop();
-    // Delay first roll
-    this.gameLoopTimeout = setTimeout(() => this.runHostTurn(), 3000);
+    if (this.conn) this.conn.close();
+    if (this.peer) this.peer.destroy();
+    this.conn = null;
+    this.peer = null;
+    this.players = [];
   }
 
-  private stopGameLoop() {
-    if (this.gameLoopTimeout) {
-      clearTimeout(this.gameLoopTimeout);
-      this.gameLoopTimeout = null;
+  // --- Communication Handler ---
+
+  private setupConnectionHandlers(conn: DataConnection) {
+    conn.on('data', (data: any) => {
+      const msg = data as NetworkMessage;
+      // console.log(`[Received] ${msg.type}`, msg.payload);
+      
+      if (this.isHost) {
+        this.handleHostMessage(msg);
+      } else {
+        this.handleGuestMessage(msg);
+      }
+    });
+
+    conn.on('close', () => {
+      alert('Connection lost');
+      this.trigger(SocketEvents.MATCH_END, { winnerId: null });
+      this.disconnect();
+    });
+  }
+
+  private send(msg: NetworkMessage) {
+    if (this.conn && this.conn.open) {
+      this.conn.send(msg);
     }
   }
 
-  private runHostTurn() {
-    if (!this.currentRoomId || !this.currentUser) return;
+  // --- HOST LOGIC (Server Authority) ---
 
-    const db = this.getDB();
-    const room = db.rooms[this.currentRoomId];
-    
-    if (!room || room.players.length < 2) return;
+  private handleHostMessage(msg: NetworkMessage) {
+    switch (msg.type) {
+      case 'JOIN_REQUEST':
+        if (this.players.length >= 2) return; // Full
 
-    const p1 = room.players[0];
-    const p2 = room.players[1];
+        const guestPlayer: Player = {
+          id: msg.payload.id,
+          name: msg.payload.name,
+          score: 0,
+          isSelf: false 
+        };
+        
+        this.players.push(guestPlayer);
 
-    // 1. Generate Numbers
+        // Notify Guest they joined
+        this.send({
+          type: SocketEvents.MATCH_START,
+          payload: { roomId: this.peerId, players: this.players }
+        });
+
+        // Notify Host UI
+        this.trigger(SocketEvents.MATCH_START, {
+          roomId: this.peerId,
+          players: this.players.map(p => ({...p, isSelf: p.id === this.currentUser?.id}))
+        });
+
+        // Start Game
+        setTimeout(() => this.runGameLoop(), 2000);
+        break;
+    }
+  }
+
+  private runGameLoop() {
+    if (!this.isHost || this.players.length < 2) return;
+
+    // 1. Roll Dice
+    const p1 = this.players[0];
+    const p2 = this.players[1];
     const p1Roll = Math.floor(Math.random() * 6) + 1;
     const p2Roll = Math.floor(Math.random() * 6) + 1;
 
@@ -343,48 +274,73 @@ class MockSocketService {
     else if (p2Roll > p1Roll) winnerId = p2.id;
     else newRound = true;
 
-    // 2. Update Room in Storage
     const result: DiceResultPayload = {
-      rolls: {
-        [p1.id]: p1Roll,
-        [p2.id]: p2Roll
-      },
+      rolls: { [p1.id]: p1Roll, [p2.id]: p2Roll },
       winnerId,
       newRound
     };
 
-    room.lastRoll = result;
-    
-    // Update Leaderboard if win
+    // 2. Broadcast to Guest
+    this.send({ type: SocketEvents.DICE_RESULT, payload: result });
+
+    // 3. Update Host UI
+    this.trigger(SocketEvents.DICE_RESULT, result);
+
+    // 4. Handle End or Loop
     if (winnerId) {
-        const winnerName = room.players.find(p => p.id === winnerId)?.name;
-        if (winnerName && db.users[winnerName]) {
-            db.users[winnerName].wins += 1;
-        }
-    }
-
-    db.rooms[this.currentRoomId] = room;
-    
-    // Save (This triggers 'storage' event for Guest)
-    this.saveRooms(db.rooms);
-    this.saveDB(db); 
-
-    // Trigger local update for Host
-    this.syncRoomState();
-
-    // Loop if tie
-    if (newRound) {
-        this.gameLoopTimeout = setTimeout(() => this.runHostTurn(), 4000); // 4s delay for re-roll
+        setTimeout(() => {
+            const endMsg = { winnerId };
+            this.send({ type: SocketEvents.MATCH_END, payload: endMsg });
+            this.trigger(SocketEvents.MATCH_END, endMsg);
+        }, 3000);
+    } else {
+        // Tie, re-roll
+        this.gameLoopTimeout = setTimeout(() => this.runGameLoop(), 4000);
     }
   }
 
-  // Helper to trigger client listeners
+  private stopGameLoop() {
+    if (this.gameLoopTimeout) clearTimeout(this.gameLoopTimeout);
+  }
+
+  // --- GUEST LOGIC ---
+
+  private handleGuestMessage(msg: NetworkMessage) {
+    // Pass events directly to UI
+    // Need to process players array to set correct 'isSelf'
+    if (msg.type === SocketEvents.MATCH_START) {
+        const players = msg.payload.players.map((p: Player) => ({
+            ...p,
+            isSelf: p.id === this.currentUser?.id
+        }));
+        this.trigger(msg.type, { ...msg.payload, players });
+    } else {
+        this.trigger(msg.type, msg.payload);
+    }
+  }
+
+  // --- Helpers ---
+  
+  private handleLogin(payload: LoginPayload) {
+    // Simple mock login
+    this.currentUser = { 
+      id: 'u_' + Math.floor(Math.random() * 10000), 
+      name: payload.username 
+    };
+    sessionStorage.setItem('dc_user', JSON.stringify(this.currentUser));
+    this.trigger(SocketEvents.LOGIN_SUCCESS, { user: this.currentUser });
+  }
+
+  private handleLogout() {
+    this.currentUser = null;
+    sessionStorage.removeItem('dc_user');
+  }
+
   private trigger(event: string, data: any) {
-    // console.log(`[LocalServer -> Client] ${event}`, data);
     if (this.listeners[event]) {
       this.listeners[event].forEach(cb => cb(data));
     }
   }
 }
 
-export const socketService = new MockSocketService();
+export const socketService = new P2PSocketService();
