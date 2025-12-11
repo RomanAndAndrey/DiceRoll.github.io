@@ -38,19 +38,25 @@ export const GameRoom: React.FC<GameRoomProps> = ({ gameState, onReset }) => {
             <Share2 className="w-8 h-8 text-amber-500" />
           </div>
           <h2 className="text-2xl font-bold mb-2">Waiting for Opponent</h2>
-          <p className="text-slate-400 mb-6">Share this Room ID to start the duel.</p>
+          <p className="text-slate-400 mb-6">Share this code with a friend to start the duel.</p>
           
           <div 
             onClick={copyRoomId}
             className="bg-slate-900 border-2 border-dashed border-slate-600 rounded-xl p-4 flex items-center justify-between cursor-pointer hover:border-indigo-500 hover:bg-slate-900/80 transition-all group mb-4"
           >
-            <code className="text-xl font-mono text-indigo-400 font-bold">{gameState.roomId}</code>
+            <code className="text-3xl font-mono text-indigo-400 font-black tracking-widest">{gameState.roomId}</code>
             <div className="text-slate-500 group-hover:text-white transition-colors">
               {showCopyFeedback ? <span className="text-xs text-emerald-500 font-bold">COPIED!</span> : <Copy className="w-5 h-5" />}
             </div>
           </div>
+          
+           <div className="flex items-center justify-center gap-2 text-slate-500 text-sm mb-6">
+              <span className="w-2 h-2 bg-indigo-500 rounded-full animate-ping" />
+              Listening for player to join...
+           </div>
+
            <Button variant="secondary" onClick={handleLeave} className="w-full">
-            Cancel
+            Cancel Lobby
           </Button>
         </div>
       </div>
@@ -66,7 +72,7 @@ export const GameRoom: React.FC<GameRoomProps> = ({ gameState, onReset }) => {
       <header className="relative z-10 flex justify-between items-center p-4 md:p-6 border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-sm">
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_10px_#10b981]" />
-          <span className="text-xs font-bold tracking-widest text-emerald-500 uppercase">Sudden Death</span>
+          <span className="text-xs font-bold tracking-widest text-emerald-500 uppercase">Live PVP</span>
         </div>
         <div className="font-mono text-slate-500 text-sm hidden md:block">ROOM: {gameState.roomId}</div>
         <button onClick={handleLeave} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400 hover:text-white">
@@ -84,7 +90,7 @@ export const GameRoom: React.FC<GameRoomProps> = ({ gameState, onReset }) => {
                 <h3 className="font-bold text-slate-300">{opponent?.name || 'Opponent'}</h3>
              </div>
              <div className="w-12 h-12 rounded-full bg-gradient-to-br from-rose-500 to-orange-600 flex items-center justify-center shadow-lg text-white font-bold text-lg">
-                {opponent?.name.charAt(0).toUpperCase()}
+                {opponent?.name?.charAt(0).toUpperCase() || '?'}
              </div>
            </div>
            
@@ -138,7 +144,7 @@ export const GameRoom: React.FC<GameRoomProps> = ({ gameState, onReset }) => {
 
            <div className="flex items-center gap-4 mt-2 opacity-90">
              <div className="w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-lg text-white font-bold text-lg ring-2 ring-indigo-400 ring-offset-2 ring-offset-slate-900">
-                {self?.name.charAt(0).toUpperCase()}
+                {self?.name?.charAt(0).toUpperCase()}
              </div>
              <div>
                 <h3 className="font-bold text-white text-lg">{self?.name || 'You'}</h3>
