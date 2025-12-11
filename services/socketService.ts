@@ -9,14 +9,18 @@ interface NetworkMessage {
   payload: any;
 }
 
-// Configuration for NAT Traversal
+// Extended List of Free STUN Servers to bypass NAT/Firewalls
 const PEER_CONFIG: PeerOptions = {
-    debug: 2,
-    secure: true, // Crucial for HTTPS (GitHub Pages)
+    debug: 1,
+    secure: true,
     config: {
         iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
         ]
     }
 };
@@ -40,6 +44,8 @@ class P2PSocketService {
   // Game Loop State (Host Only)
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
+  private retryCount = 0;
+  private maxRetries = 5;
   
   private readonly ID_PREFIX = 'dc-v1-'; 
 
@@ -139,7 +145,6 @@ class P2PSocketService {
     this.peer.on('connection', (conn) => {
       console.log('[Host] Connection received');
       
-      // Only allow one opponent
       if (this.conn && this.conn.open) {
           console.warn('[Host] Room full, rejecting');
           conn.close();
@@ -152,7 +157,12 @@ class P2PSocketService {
 
     this.peer.on('error', (err) => {
         console.error('[Host] Peer Error:', err);
-        alert('Could not create room. ID might be taken, try again.');
+        // If ID is taken, try to regenerate automatically or alert
+        if (err.type === 'unavailable-id') {
+           this.trigger(SocketEvents.ERROR, { message: 'Room code collision. Try again.' });
+        } else {
+           this.trigger(SocketEvents.ERROR, { message: 'Failed to create room.' });
+        }
         this.disconnect();
     });
   }
@@ -161,67 +171,91 @@ class P2PSocketService {
     if (!this.currentUser) return;
     this.disconnect();
     this.isHost = false;
+    this.retryCount = 0;
 
     const fullTargetId = this.ID_PREFIX + shortCode.trim();
-    console.log(`[Guest] Connecting to: ${shortCode}`);
+    console.log(`[Guest] Initializing Peer to join: ${shortCode}`);
 
+    // Create a random peer ID for the guest
     this.peer = new Peer(PEER_CONFIG);
-
-    // Safety timeout
-    this.connectionTimeout = setTimeout(() => {
-        console.error('[Guest] Timeout');
-        this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Check code.' });
-        this.disconnect();
-    }, 12000); 
 
     this.peer.on('open', (myId) => {
       console.log('[Guest] Peer Ready:', myId);
-      
-      // Tiny delay to ensure candidates are ready
-      setTimeout(() => {
-          if (!this.peer) return;
-          
-          const conn = this.peer.connect(fullTargetId, {
-              reliable: true,
-              serialization: 'json'
-          });
-          
-          this.conn = conn;
-          this.setupConnectionHandlers(conn);
-
-          conn.on('open', () => {
-            console.log('[Guest] Connected to Host!');
-            if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
-
-            this.send({
-              type: 'JOIN_REQUEST',
-              payload: { 
-                id: this.currentUser!.id, 
-                name: this.currentUser!.name 
-              }
-            });
-          });
-
-          // Handle immediate connection errors (host offline)
-          conn.on('error', (err) => {
-              console.error('[Guest] Conn Error:', err);
-          });
-
-      }, 500);
+      this.attemptConnection(fullTargetId);
     });
 
     this.peer.on('error', (err: any) => {
       console.error('[Guest] Peer Error:', err);
-      if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
-      
-      let msg = 'Connection failed';
-      if (err.type === 'peer-unavailable') {
-         msg = 'Room not found! Check code.';
-      } else if (err.type === 'network') {
-         msg = 'Network error.';
+      // Critical errors
+      if (err.type === 'network' || err.type === 'browser-incompatible') {
+         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Network error or incompatible browser.' });
+         this.disconnect();
       }
-      this.trigger(SocketEvents.CONNECT_ERROR, { message: msg });
-      this.disconnect(); 
+    });
+  }
+
+  private attemptConnection(targetId: string) {
+    if (!this.peer) return;
+
+    this.retryCount++;
+    console.log(`[Guest] Connection attempt ${this.retryCount}/${this.maxRetries} to ${targetId}`);
+
+    // Clean up previous attempt
+    if (this.conn) {
+        this.conn.close();
+    }
+
+    // Connect without 'serialization: json' to rely on default binary/utf8 which is sometimes more stable
+    const conn = this.peer.connect(targetId, {
+        reliable: true
+    });
+    
+    this.conn = conn;
+
+    // Set a short timeout for THIS specific attempt
+    const attemptTimeout = setTimeout(() => {
+        console.warn(`[Guest] Attempt ${this.retryCount} timed out.`);
+        if (this.retryCount < this.maxRetries) {
+            this.attemptConnection(targetId);
+        } else {
+            this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Could not find room. Is the Host online?' });
+            this.disconnect();
+        }
+    }, 3500); // 3.5 seconds per attempt
+
+    conn.on('open', () => {
+        console.log('[Guest] Connected to Host!');
+        clearTimeout(attemptTimeout);
+        this.setupConnectionHandlers(conn);
+
+        // Send Join Request
+        this.send({
+          type: 'JOIN_REQUEST',
+          payload: { 
+            id: this.currentUser!.id, 
+            name: this.currentUser!.name 
+          }
+        });
+    });
+
+    conn.on('error', (err) => {
+        console.error('[Guest] Connection Error:', err);
+        // Usually fires if peer not found immediately
+        clearTimeout(attemptTimeout);
+        if (this.retryCount < this.maxRetries) {
+            setTimeout(() => this.attemptConnection(targetId), 1000);
+        } else {
+             this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Room not found.' });
+        }
+    });
+    
+    // Sometimes PeerJS emits 'close' immediately if ID not found
+    conn.on('close', () => {
+        // If we haven't successfully joined yet (no players loaded), treat as failure
+        if (this.players.length === 0) {
+            // This acts like a retry trigger if it happens fast
+            // But usually handled by timeout
+        }
     });
   }
 
@@ -255,12 +289,6 @@ class P2PSocketService {
     conn.on('close', () => {
       console.log('[Connection] Closed remotely');
       this.trigger(SocketEvents.MATCH_END, { winnerId: null });
-      // Don't fully destroy peer so we can re-create logic if needed, 
-      // but simpler to just reset for now.
-    });
-    
-    conn.on('error', (err) => {
-        console.error('[Connection] Data Error:', err);
     });
   }
 
