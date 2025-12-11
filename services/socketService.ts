@@ -9,52 +9,43 @@ interface NetworkMessage {
   payload: any;
 }
 
-// Extended List of Free STUN Servers to bypass NAT/Firewalls
+// SIMPLIFIED CONFIG: Only 2 reliable Google servers.
+// Adding more causes the "Slows down discovery" error seen in logs.
 const PEER_CONFIG: PeerOptions = {
     debug: 1,
     secure: true,
+    host: '0.peerjs.com',
+    port: 443,
     config: {
         iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
         ]
     }
 };
 
-/**
- * P2P SOCKET SERVICE (WebRTC / PeerJS)
- */
 class P2PSocketService {
   private listeners: Record<string, Listener[]> = {};
   
-  // PeerJS State
   private peer: Peer | null = null;
   private conn: DataConnection | null = null;
   private peerId: string | null = null;
   private isHost: boolean = false;
   
-  // App State
   public currentUser: { id: string; name: string } | null = null;
   private players: Player[] = [];
 
-  // Game Loop State (Host Only)
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
-  private retryCount = 0;
-  private maxRetries = 5;
   
-  private readonly ID_PREFIX = 'dc-v1-'; 
+  // New prefix to force fresh discovery
+  private readonly ID_PREFIX = 'cube-v4-'; 
 
   constructor() {
-    console.log('[System] P2P Service Initialized');
+    console.log('[System] P2P Service v4 Initialized');
     this.restoreSession();
   }
 
-  // --- Session ---
   private restoreSession() {
     const session = sessionStorage.getItem('dc_user');
     if (session) {
@@ -63,8 +54,6 @@ class P2PSocketService {
       } catch(e) {}
     }
   }
-
-  // --- Public API ---
 
   public getUserId(): string {
     return this.currentUser?.id || 'guest';
@@ -113,23 +102,27 @@ class P2PSocketService {
     }
   }
 
-  // --- Core P2P Logic ---
+  // --- HOST LOGIC ---
 
   private createHost() {
     if (!this.currentUser) return;
     this.disconnect(); 
     this.isHost = true;
     
-    // Generate simple 4 digit code
     const shortCode = Math.floor(1000 + Math.random() * 9000).toString();
     const fullId = this.ID_PREFIX + shortCode;
 
-    console.log(`[Host] Creating room: ${shortCode}`);
+    console.log(`[Host] Registering ID: ${fullId}`);
 
-    this.peer = new Peer(fullId, PEER_CONFIG);
+    try {
+        this.peer = new Peer(fullId, PEER_CONFIG);
+    } catch (e) {
+        console.error("Peer creation failed", e);
+        return;
+    }
 
     this.peer.on('open', (id) => {
-      console.log('[Host] Peer Open:', id);
+      console.log('[Host] Online. Waiting for connections on:', id);
       this.peerId = id;
       
       this.players = [{
@@ -143,10 +136,10 @@ class P2PSocketService {
     });
 
     this.peer.on('connection', (conn) => {
-      console.log('[Host] Connection received');
+      console.log('[Host] Incoming connection...');
       
       if (this.conn && this.conn.open) {
-          console.warn('[Host] Room full, rejecting');
+          console.warn('[Host] Rejecting extra player');
           conn.close();
           return;
       }
@@ -156,79 +149,52 @@ class P2PSocketService {
     });
 
     this.peer.on('error', (err) => {
-        console.error('[Host] Peer Error:', err);
-        // If ID is taken, try to regenerate automatically or alert
+        console.error('[Host] Error:', err);
         if (err.type === 'unavailable-id') {
-           this.trigger(SocketEvents.ERROR, { message: 'Room code collision. Try again.' });
+           this.trigger(SocketEvents.ERROR, { message: 'ID Collision. Try again.' });
         } else {
-           this.trigger(SocketEvents.ERROR, { message: 'Failed to create room.' });
+           this.trigger(SocketEvents.ERROR, { message: 'Network Error: ' + err.type });
         }
-        this.disconnect();
     });
   }
+
+  // --- GUEST LOGIC ---
 
   private joinHost(shortCode: string) {
     if (!this.currentUser) return;
     this.disconnect();
     this.isHost = false;
-    this.retryCount = 0;
 
     const fullTargetId = this.ID_PREFIX + shortCode.trim();
-    console.log(`[Guest] Initializing Peer to join: ${shortCode}`);
+    console.log(`[Guest] Looking for room: ${fullTargetId}`);
 
-    // Create a random peer ID for the guest
+    // Guest creates a random ID
     this.peer = new Peer(PEER_CONFIG);
 
+    // Global timeout for the whole process
+    this.connectionTimeout = setTimeout(() => {
+        console.error('[Guest] Global Timeout');
+        this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Host may be offline.' });
+        this.disconnect();
+    }, 10000);
+
     this.peer.on('open', (myId) => {
-      console.log('[Guest] Peer Ready:', myId);
-      this.attemptConnection(fullTargetId);
-    });
+      console.log('[Guest] Peer Ready. Connecting...');
+      
+      const conn = this.peer!.connect(fullTargetId, {
+          reliable: true,
+          serialization: 'json'
+      });
+      
+      this.conn = conn;
 
-    this.peer.on('error', (err: any) => {
-      console.error('[Guest] Peer Error:', err);
-      // Critical errors
-      if (err.type === 'network' || err.type === 'browser-incompatible') {
-         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Network error or incompatible browser.' });
-         this.disconnect();
-      }
-    });
-  }
-
-  private attemptConnection(targetId: string) {
-    if (!this.peer) return;
-
-    this.retryCount++;
-    console.log(`[Guest] Connection attempt ${this.retryCount}/${this.maxRetries} to ${targetId}`);
-
-    // Clean up previous attempt
-    if (this.conn) {
-        this.conn.close();
-    }
-
-    // Connect without 'serialization: json' to rely on default binary/utf8 which is sometimes more stable
-    const conn = this.peer.connect(targetId, {
-        reliable: true
-    });
-    
-    this.conn = conn;
-
-    // Set a short timeout for THIS specific attempt
-    const attemptTimeout = setTimeout(() => {
-        console.warn(`[Guest] Attempt ${this.retryCount} timed out.`);
-        if (this.retryCount < this.maxRetries) {
-            this.attemptConnection(targetId);
-        } else {
-            this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Could not find room. Is the Host online?' });
-            this.disconnect();
-        }
-    }, 3500); // 3.5 seconds per attempt
-
-    conn.on('open', () => {
-        console.log('[Guest] Connected to Host!');
-        clearTimeout(attemptTimeout);
+      conn.on('open', () => {
+        console.log('[Guest] Connection Established!');
+        if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+        
         this.setupConnectionHandlers(conn);
 
-        // Send Join Request
+        // Immediate handshake
         this.send({
           type: 'JOIN_REQUEST',
           payload: { 
@@ -236,26 +202,28 @@ class P2PSocketService {
             name: this.currentUser!.name 
           }
         });
+      });
+
+      // Crucial: Handle if connection dies immediately
+      conn.on('close', () => {
+          console.log('[Guest] Connection closed');
+      });
+
+      conn.on('error', (err) => {
+          console.error('[Guest] Conn Error', err);
+      });
     });
 
-    conn.on('error', (err) => {
-        console.error('[Guest] Connection Error:', err);
-        // Usually fires if peer not found immediately
-        clearTimeout(attemptTimeout);
-        if (this.retryCount < this.maxRetries) {
-            setTimeout(() => this.attemptConnection(targetId), 1000);
-        } else {
-             this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Room not found.' });
-        }
-    });
-    
-    // Sometimes PeerJS emits 'close' immediately if ID not found
-    conn.on('close', () => {
-        // If we haven't successfully joined yet (no players loaded), treat as failure
-        if (this.players.length === 0) {
-            // This acts like a retry trigger if it happens fast
-            // But usually handled by timeout
-        }
+    this.peer.on('error', (err: any) => {
+      console.error('[Guest] Peer Error:', err.type);
+      if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+      
+      if (err.type === 'peer-unavailable') {
+         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Room not found. Check ID.' });
+      } else {
+         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection failed: ' + err.type });
+      }
+      this.disconnect();
     });
   }
 
@@ -274,7 +242,7 @@ class P2PSocketService {
     this.players = [];
   }
 
-  // --- Handlers ---
+  // --- SHARED HANDLERS ---
 
   private setupConnectionHandlers(conn: DataConnection) {
     conn.on('data', (data: any) => {
@@ -287,7 +255,7 @@ class P2PSocketService {
     });
 
     conn.on('close', () => {
-      console.log('[Connection] Closed remotely');
+      console.log('[Connection] Lost');
       this.trigger(SocketEvents.MATCH_END, { winnerId: null });
     });
   }
@@ -298,12 +266,11 @@ class P2PSocketService {
     }
   }
 
-  // --- Host Logic ---
+  // --- LOGIC ---
 
   private handleHostMessage(msg: NetworkMessage) {
-    switch (msg.type) {
-      case 'JOIN_REQUEST':
-        console.log('[Host] Player joined:', msg.payload.name);
+    if (msg.type === 'JOIN_REQUEST') {
+        console.log('[Host] Accepting player:', msg.payload.name);
         this.stopGameLoop();
 
         const guestPlayer: Player = {
@@ -316,27 +283,23 @@ class P2PSocketService {
         const hostPlayer = this.players.find(p => p.isSelf)!;
         this.players = [hostPlayer, guestPlayer];
 
-        // Send match start to Guest
         this.send({
           type: SocketEvents.MATCH_START,
           payload: { roomId: this.peerId?.replace(this.ID_PREFIX, ''), players: this.players }
         });
 
-        // Update Host UI
         this.trigger(SocketEvents.MATCH_START, {
           roomId: this.peerId?.replace(this.ID_PREFIX, ''),
           players: this.players.map(p => ({...p, isSelf: p.id === this.currentUser?.id}))
         });
 
         setTimeout(() => this.runGameLoop(), 2000);
-        break;
     }
   }
 
   private runGameLoop() {
     if (!this.isHost || this.players.length < 2) return;
 
-    // Game Logic
     const p1 = this.players[0];
     const p2 = this.players[1];
     const p1Roll = Math.floor(Math.random() * 6) + 1;
@@ -373,8 +336,6 @@ class P2PSocketService {
     if (this.gameLoopTimeout) clearTimeout(this.gameLoopTimeout);
   }
 
-  // --- Guest Logic ---
-
   private handleGuestMessage(msg: NetworkMessage) {
     if (msg.type === SocketEvents.MATCH_START) {
         const players = msg.payload.players.map((p: Player) => ({
@@ -386,8 +347,6 @@ class P2PSocketService {
         this.trigger(msg.type, msg.payload);
     }
   }
-
-  // --- Helpers ---
   
   private handleLogin(payload: LoginPayload) {
     this.currentUser = { 
