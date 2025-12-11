@@ -1,0 +1,5 @@
+{
+  "name": "Duel of Cubes",
+  "description": "A low-latency real-time 1v1 dice game using WebSocket architecture concepts. Features a lobby system, optimistic UI updates, and server-authoritative game logic simulation.",
+  "requestFramePermissions": []
+}
