@@ -125,14 +125,25 @@ export default function App() {
       }, 1000); 
     };
 
-    const handleMatchEnd = (data: { winnerId: string }) => {
+    const handleMatchEnd = (data: { winnerId: string | null }) => {
       if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
-      setGameState(prev => ({
-        ...prev,
-        status: RoomStatus.COMPLETE,
-        roundWinnerId: data.winnerId, 
-        message: 'GAME OVER'
-      }));
+      
+      setGameState(prev => {
+        // CRITICAL FIX: If the match is already complete (we have a winner),
+        // and we receive a disconnect event (winnerId is null/undefined),
+        // IGNORE it. This prevents the "Game Over" modal from disappearing
+        // when the OTHER player clicks "Return to Lobby".
+        if (prev.status === RoomStatus.COMPLETE && prev.roundWinnerId && !data.winnerId) {
+            return prev;
+        }
+
+        return {
+          ...prev,
+          status: RoomStatus.COMPLETE,
+          roundWinnerId: data.winnerId, 
+          message: 'GAME OVER'
+        };
+      });
     };
 
     // Register
