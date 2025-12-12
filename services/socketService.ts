@@ -9,13 +9,11 @@ interface NetworkMessage {
   payload: any;
 }
 
-// SIMPLIFIED CONFIG: Only 2 reliable Google servers.
-// Adding more causes the "Slows down discovery" error seen in logs.
+// FIX: Use exactly 2 reliable Google STUN servers.
+// Using more triggers the "slows down discovery" warning and causes timeouts.
 const PEER_CONFIG: PeerOptions = {
-    debug: 1,
+    debug: 1, // Lower debug level to reduce console noise
     secure: true,
-    host: '0.peerjs.com',
-    port: 443,
     config: {
         iceServers: [
             { urls: 'stun:stun1.l.google.com:19302' },
@@ -38,12 +36,17 @@ class P2PSocketService {
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
   
-  // New prefix to force fresh discovery
-  private readonly ID_PREFIX = 'cube-v4-'; 
+  // NEW PREFIX: Ensures we don't connect to old/stale cached peers from previous versions
+  private readonly ID_PREFIX = 'cube-v7-'; 
 
   constructor() {
-    console.log('[System] P2P Service v4 Initialized');
+    console.log('[System] P2P Service v7 Initialized');
     this.restoreSession();
+    
+    // Safety: Disconnect when closing the tab to free up the ID
+    window.addEventListener('beforeunload', () => {
+        this.disconnect();
+    });
   }
 
   private restoreSession() {
@@ -93,6 +96,7 @@ class P2PSocketService {
         this.disconnect();
         break;
       case SocketEvents.GET_LEADERBOARD:
+        // Mock data for leaderboard
         this.trigger(SocketEvents.LEADERBOARD_DATA, [
             { name: "CyberKing", wins: 42 },
             { name: "DiceMaster", wins: 38 },
@@ -112,17 +116,18 @@ class P2PSocketService {
     const shortCode = Math.floor(1000 + Math.random() * 9000).toString();
     const fullId = this.ID_PREFIX + shortCode;
 
-    console.log(`[Host] Registering ID: ${fullId}`);
+    console.log(`[Host] Creating Room: ${shortCode} (ID: ${fullId})`);
 
     try {
         this.peer = new Peer(fullId, PEER_CONFIG);
     } catch (e) {
         console.error("Peer creation failed", e);
+        this.trigger(SocketEvents.ERROR, { message: 'Failed to initialize network.' });
         return;
     }
 
     this.peer.on('open', (id) => {
-      console.log('[Host] Online. Waiting for connections on:', id);
+      console.log('[Host] Online. Ready for connections.');
       this.peerId = id;
       
       this.players = [{
@@ -136,8 +141,9 @@ class P2PSocketService {
     });
 
     this.peer.on('connection', (conn) => {
-      console.log('[Host] Incoming connection...');
+      console.log('[Host] Guest connecting...');
       
+      // If we already have a guest, reject new ones
       if (this.conn && this.conn.open) {
           console.warn('[Host] Rejecting extra player');
           conn.close();
@@ -151,9 +157,11 @@ class P2PSocketService {
     this.peer.on('error', (err) => {
         console.error('[Host] Error:', err);
         if (err.type === 'unavailable-id') {
-           this.trigger(SocketEvents.ERROR, { message: 'ID Collision. Try again.' });
+           this.trigger(SocketEvents.ERROR, { message: 'Room ID collision. Please try again.' });
+        } else if (err.type === 'network') {
+           this.trigger(SocketEvents.ERROR, { message: 'Network error. Check your connection.' });
         } else {
-           this.trigger(SocketEvents.ERROR, { message: 'Network Error: ' + err.type });
+           this.trigger(SocketEvents.ERROR, { message: `Host Error: ${err.type}` });
         }
     });
   }
@@ -166,35 +174,35 @@ class P2PSocketService {
     this.isHost = false;
 
     const fullTargetId = this.ID_PREFIX + shortCode.trim();
-    console.log(`[Guest] Looking for room: ${fullTargetId}`);
+    console.log(`[Guest] Connecting to Room: ${shortCode} (${fullTargetId})`);
 
     // Guest creates a random ID
     this.peer = new Peer(PEER_CONFIG);
 
-    // Global timeout for the whole process
+    // Global timeout: If we don't connect in 10s, fail gracefully
     this.connectionTimeout = setTimeout(() => {
-        console.error('[Guest] Global Timeout');
+        console.error('[Guest] Connection Timeout');
         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Host may be offline.' });
         this.disconnect();
     }, 10000);
 
     this.peer.on('open', (myId) => {
-      console.log('[Guest] Peer Ready. Connecting...');
+      console.log('[Guest] Peer initialized. Dialing host...');
       
       const conn = this.peer!.connect(fullTargetId, {
           reliable: true,
-          serialization: 'json'
+          serialization: 'json' // Explicitly use JSON serialization
       });
       
       this.conn = conn;
 
       conn.on('open', () => {
-        console.log('[Guest] Connection Established!');
+        console.log('[Guest] Connected to Host!');
         if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
         
         this.setupConnectionHandlers(conn);
 
-        // Immediate handshake
+        // Send handshake immediately
         this.send({
           type: 'JOIN_REQUEST',
           payload: { 
@@ -204,13 +212,13 @@ class P2PSocketService {
         });
       });
 
-      // Crucial: Handle if connection dies immediately
+      // Handle immediate closure (e.g. host rejected)
       conn.on('close', () => {
-          console.log('[Guest] Connection closed');
+          console.log('[Guest] Connection closed by host or lost');
       });
 
       conn.on('error', (err) => {
-          console.error('[Guest] Conn Error', err);
+          console.error('[Guest] Connection Error', err);
       });
     });
 
@@ -219,7 +227,7 @@ class P2PSocketService {
       if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
       
       if (err.type === 'peer-unavailable') {
-         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Room not found. Check ID.' });
+         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Room not found. Is the Host online?' });
       } else {
          this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection failed: ' + err.type });
       }
@@ -246,7 +254,9 @@ class P2PSocketService {
 
   private setupConnectionHandlers(conn: DataConnection) {
     conn.on('data', (data: any) => {
+      // Data is already JSON object due to serialization: 'json'
       const msg = data as NetworkMessage;
+      
       if (this.isHost) {
         this.handleHostMessage(msg);
       } else {
@@ -255,22 +265,28 @@ class P2PSocketService {
     });
 
     conn.on('close', () => {
-      console.log('[Connection] Lost');
+      console.log('[Connection] Disconnected');
       this.trigger(SocketEvents.MATCH_END, { winnerId: null });
+      // If we are guest, we might want to return to lobby
+      if (!this.isHost) {
+          this.trigger(SocketEvents.ERROR, { message: 'Host disconnected.' });
+      }
     });
   }
 
   private send(msg: NetworkMessage) {
     if (this.conn && this.conn.open) {
       this.conn.send(msg);
+    } else {
+      console.warn('Cannot send message, connection is not open');
     }
   }
 
-  // --- LOGIC ---
+  // --- GAMEPLAY LOGIC ---
 
   private handleHostMessage(msg: NetworkMessage) {
     if (msg.type === 'JOIN_REQUEST') {
-        console.log('[Host] Accepting player:', msg.payload.name);
+        console.log('[Host] Player joined:', msg.payload.name);
         this.stopGameLoop();
 
         const guestPlayer: Player = {
@@ -283,16 +299,19 @@ class P2PSocketService {
         const hostPlayer = this.players.find(p => p.isSelf)!;
         this.players = [hostPlayer, guestPlayer];
 
+        // 1. Notify Guest
         this.send({
           type: SocketEvents.MATCH_START,
           payload: { roomId: this.peerId?.replace(this.ID_PREFIX, ''), players: this.players }
         });
 
+        // 2. Notify Host UI
         this.trigger(SocketEvents.MATCH_START, {
           roomId: this.peerId?.replace(this.ID_PREFIX, ''),
           players: this.players.map(p => ({...p, isSelf: p.id === this.currentUser?.id}))
         });
 
+        // Start game loop after delay
         setTimeout(() => this.runGameLoop(), 2000);
     }
   }
@@ -300,8 +319,9 @@ class P2PSocketService {
   private runGameLoop() {
     if (!this.isHost || this.players.length < 2) return;
 
-    const p1 = this.players[0];
-    const p2 = this.players[1];
+    // Logic: Roll dice
+    const p1 = this.players[0]; // Host
+    const p2 = this.players[1]; // Guest
     const p1Roll = Math.floor(Math.random() * 6) + 1;
     const p2Roll = Math.floor(Math.random() * 6) + 1;
 
@@ -318,16 +338,19 @@ class P2PSocketService {
       newRound
     };
 
+    // Broadcast result
     this.send({ type: SocketEvents.DICE_RESULT, payload: result });
     this.trigger(SocketEvents.DICE_RESULT, result);
 
     if (winnerId) {
+        // Match over
         setTimeout(() => {
             const endMsg = { winnerId };
             this.send({ type: SocketEvents.MATCH_END, payload: endMsg });
             this.trigger(SocketEvents.MATCH_END, endMsg);
-        }, 3000);
+        }, 3500);
     } else {
+        // Tie -> Reroll
         this.gameLoopTimeout = setTimeout(() => this.runGameLoop(), 4000);
     }
   }
@@ -338,6 +361,7 @@ class P2PSocketService {
 
   private handleGuestMessage(msg: NetworkMessage) {
     if (msg.type === SocketEvents.MATCH_START) {
+        // Remap players so "isSelf" is correct for the guest
         const players = msg.payload.players.map((p: Player) => ({
             ...p,
             isSelf: p.id === this.currentUser?.id
@@ -349,6 +373,7 @@ class P2PSocketService {
   }
   
   private handleLogin(payload: LoginPayload) {
+    // Simple mock login
     this.currentUser = { 
       id: 'u_' + Math.floor(Math.random() * 100000), 
       name: payload.username 
