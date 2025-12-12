@@ -21,6 +21,13 @@ const PEER_CONFIG: PeerOptions = {
     }
 };
 
+// Types for our LocalStorage DB
+interface UserRecord {
+    id: string;
+    password: string;
+    wins: number;
+}
+
 class P2PSocketService {
   private listeners: Record<string, Listener[]> = {};
   
@@ -35,11 +42,12 @@ class P2PSocketService {
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
   
-  // VERSION CHECK: v11 - Independent Leave Button
-  private readonly ID_PREFIX = 'cube-v11-'; 
+  // VERSION CHECK: v12 - Real Leaderboard & Stats
+  private readonly ID_PREFIX = 'cube-v12-'; 
+  private readonly DB_KEY = 'dc_users_db_v1';
 
   constructor() {
-    console.log('%c [System] P2P Service v11 (Independent Leave) LOADED ', 'background: #06b6d4; color: white; font-weight: bold;');
+    console.log('%c [System] P2P Service v12 (Stats Engine) LOADED ', 'background: #10b981; color: black; font-weight: bold;');
     this.restoreSession();
     
     // Safety: Disconnect when closing the tab
@@ -95,12 +103,7 @@ class P2PSocketService {
         this.disconnect();
         break;
       case SocketEvents.GET_LEADERBOARD:
-        // Mock data
-        this.trigger(SocketEvents.LEADERBOARD_DATA, [
-            { name: "CyberKing", wins: 42 },
-            { name: "DiceMaster", wins: 38 },
-            { name: "LuckBox", wins: 15 }
-        ]);
+        this.handleGetLeaderboard();
         break;
     }
   }
@@ -334,6 +337,9 @@ class P2PSocketService {
     this.trigger(SocketEvents.DICE_RESULT, result);
 
     if (winnerId) {
+        // Record stat if HOST won
+        this.checkAndRecordWin(winnerId);
+
         setTimeout(() => {
             const endMsg = { winnerId };
             this.send({ type: SocketEvents.MATCH_END, payload: endMsg });
@@ -355,54 +361,65 @@ class P2PSocketService {
             isSelf: p.id === this.currentUser?.id
         }));
         this.trigger(msg.type, { ...msg.payload, players });
-    } else {
+    } 
+    else if (msg.type === SocketEvents.MATCH_END) {
+        // Record stat if GUEST won
+        this.checkAndRecordWin(msg.payload.winnerId);
+        this.trigger(msg.type, msg.payload);
+    }
+    else {
         this.trigger(msg.type, msg.payload);
     }
   }
   
-  // --- AUTHENTICATION (Database Simulation) ---
+  // --- AUTHENTICATION & DB (Persistent Storage) ---
+
+  private getDb(): Record<string, UserRecord> {
+      try {
+          return JSON.parse(localStorage.getItem(this.DB_KEY) || '{}');
+      } catch {
+          return {};
+      }
+  }
+
+  private saveDb(db: Record<string, UserRecord>) {
+      localStorage.setItem(this.DB_KEY, JSON.stringify(db));
+  }
 
   private handleLogin(payload: LoginPayload) {
     const { username, password } = payload;
     
-    // Safety check
     if (!username || !password) {
         this.trigger(SocketEvents.LOGIN_FAIL, { message: 'Username and password required' });
         return;
     }
 
-    // 1. Load "Database" from localStorage (Browser memory)
-    const dbKey = 'dc_users_db_v1';
-    let db: Record<string, { password: string, id: string }>;
-    
-    try {
-        db = JSON.parse(localStorage.getItem(dbKey) || '{}');
-    } catch {
-        db = {};
-    }
+    const db = this.getDb();
 
-    // 2. Logic: Login vs Register
     if (db[username]) {
-        // User exists -> Check password
+        // Login
         const userRecord = db[username];
-        
         if (userRecord.password === password) {
-            console.log(`[Auth] User ${username} logged in successfully from DB.`);
+            console.log(`[Auth] User ${username} logged in.`);
             this.currentUser = { id: userRecord.id, name: username };
+            
+            // Migration: Add wins if old record doesn't have it
+            if (typeof userRecord.wins !== 'number') {
+                userRecord.wins = 0;
+                this.saveDb(db);
+            }
+
             this.finalizeLogin();
         } else {
-            console.warn(`[Auth] Wrong password for ${username}`);
             this.trigger(SocketEvents.LOGIN_FAIL, { message: 'Invalid password' });
         }
     } else {
-        // User new -> Register
-        console.log(`[Auth] Creating new database entry for: ${username}`);
-        
+        // Register
+        console.log(`[Auth] Registering: ${username}`);
         const newId = 'u_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
         
-        // Write to DB
-        db[username] = { password, id: newId };
-        localStorage.setItem(dbKey, JSON.stringify(db));
+        db[username] = { password, id: newId, wins: 0 };
+        this.saveDb(db);
         
         this.currentUser = { id: newId, name: username };
         this.finalizeLogin();
@@ -410,7 +427,6 @@ class P2PSocketService {
   }
 
   private finalizeLogin() {
-    // Save active session for page reloads
     sessionStorage.setItem('dc_user', JSON.stringify(this.currentUser));
     this.trigger(SocketEvents.LOGIN_SUCCESS, { user: this.currentUser });
   }
@@ -419,6 +435,41 @@ class P2PSocketService {
     this.currentUser = null;
     sessionStorage.removeItem('dc_user');
     this.disconnect();
+  }
+
+  // --- STATS & LEADERBOARD ---
+
+  private checkAndRecordWin(winnerId: string | null) {
+      if (!this.currentUser || !winnerId) return;
+
+      // Only update DB if *I* am the winner
+      if (this.currentUser.id === winnerId) {
+          console.log('[Stats] Victory! Updating database...');
+          const db = this.getDb();
+          const username = this.currentUser.name;
+
+          if (db[username]) {
+              db[username].wins = (db[username].wins || 0) + 1;
+              this.saveDb(db);
+              console.log(`[Stats] New win count for ${username}: ${db[username].wins}`);
+          }
+      }
+  }
+
+  private handleGetLeaderboard() {
+      const db = this.getDb();
+      
+      // Convert DB object to Array
+      const leaderboard: LeaderboardEntry[] = Object.keys(db).map(key => ({
+          name: key,
+          wins: db[key].wins || 0
+      }));
+
+      // Sort by wins (descending)
+      leaderboard.sort((a, b) => b.wins - a.wins);
+
+      console.log('[Leaderboard] Fetching real stats:', leaderboard);
+      this.trigger(SocketEvents.LEADERBOARD_DATA, leaderboard);
   }
 
   private trigger(event: string, data: any) {
