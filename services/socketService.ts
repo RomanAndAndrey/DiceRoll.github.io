@@ -42,12 +42,12 @@ class P2PSocketService {
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
   
-  // VERSION CHECK: v12 - Real Leaderboard & Stats
-  private readonly ID_PREFIX = 'cube-v12-'; 
+  // VERSION CHECK: v13 - Nickname Collision Protection
+  private readonly ID_PREFIX = 'cube-v13-'; 
   private readonly DB_KEY = 'dc_users_db_v1';
 
   constructor() {
-    console.log('%c [System] P2P Service v12 (Stats Engine) LOADED ', 'background: #10b981; color: black; font-weight: bold;');
+    console.log('%c [System] P2P Service v13 (Collision Check) LOADED ', 'background: #f43f5e; color: white; font-weight: bold;');
     this.restoreSession();
     
     // Safety: Disconnect when closing the tab
@@ -285,7 +285,27 @@ class P2PSocketService {
 
   private handleHostMessage(msg: NetworkMessage) {
     if (msg.type === 'JOIN_REQUEST') {
-        console.log('[Host] JOIN_REQUEST from:', msg.payload.name);
+        const guestName = msg.payload.name;
+        const hostName = this.currentUser?.name;
+        
+        console.log(`[Host] JOIN_REQUEST: ${guestName} vs ${hostName}`);
+
+        // SECURITY CHECK: PREVENT SAME NICKNAMES
+        if (guestName === hostName) {
+             console.warn('[Host] Rejecting player with same nickname');
+             this.send({
+                 type: SocketEvents.CONNECT_ERROR,
+                 payload: { message: 'Cannot play against a user with the same nickname.' }
+             });
+             
+             // Graceful close
+             setTimeout(() => {
+                 this.conn?.close();
+                 this.conn = null;
+             }, 500);
+             return;
+        }
+
         this.stopGameLoop();
 
         const guestPlayer: Player = {
