@@ -9,10 +9,16 @@ interface NetworkMessage {
   payload: any;
 }
 
-// Config: Let PeerJS handle defaults (usually Google STUN) to avoid ICE errors with outdated configs.
+// Config: Standard Google STUN servers.
 const PEER_CONFIG: PeerOptions = {
     debug: 2, 
-    secure: true
+    secure: true,
+    config: {
+        iceServers: [
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+        ]
+    }
 };
 
 // Types for our LocalStorage DB
@@ -36,12 +42,12 @@ class P2PSocketService {
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
   
-  // VERSION CHECK: v14 - Fix ICE & Negotiation Errors
-  private readonly ID_PREFIX = 'cube-v14-'; 
+  // VERSION CHECK: v12 - Real Leaderboard & Stats (Rolled back from v14)
+  private readonly ID_PREFIX = 'cube-v12-'; 
   private readonly DB_KEY = 'dc_users_db_v1';
 
   constructor() {
-    console.log('%c [System] P2P Service v14 (Connection Fixes) LOADED ', 'background: #7c3aed; color: white; font-weight: bold;');
+    console.log('%c [System] P2P Service v12 (Rolled Back) LOADED ', 'background: #10b981; color: black; font-weight: bold;');
     this.restoreSession();
     
     // Safety: Disconnect when closing the tab
@@ -179,13 +185,15 @@ class P2PSocketService {
         console.error('[Guest] Global Connection Timeout');
         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Room ID might be wrong or Host offline.' });
         this.disconnect();
-    }, 15000);
+    }, 12000);
 
     this.peer.on('open', (myId) => {
       console.log(`[Guest] Peer initialized (${myId}). Connecting to ${fullTargetId}...`);
       
-      // Removed serialization: 'json' to fix negotiation errors
-      const conn = this.peer!.connect(fullTargetId);
+      const conn = this.peer!.connect(fullTargetId, {
+          reliable: true,
+          serialization: 'json'
+      });
       
       this.conn = conn;
 
@@ -277,27 +285,7 @@ class P2PSocketService {
 
   private handleHostMessage(msg: NetworkMessage) {
     if (msg.type === 'JOIN_REQUEST') {
-        const guestName = msg.payload.name;
-        const hostName = this.currentUser?.name;
-        
-        console.log(`[Host] JOIN_REQUEST: ${guestName} vs ${hostName}`);
-
-        // SECURITY CHECK: PREVENT SAME NICKNAMES
-        if (guestName === hostName) {
-             console.warn('[Host] Rejecting player with same nickname');
-             this.send({
-                 type: SocketEvents.CONNECT_ERROR,
-                 payload: { message: 'Cannot play against a user with the same nickname.' }
-             });
-             
-             // Graceful close
-             setTimeout(() => {
-                 this.conn?.close();
-                 this.conn = null;
-             }, 500);
-             return;
-        }
-
+        console.log('[Host] JOIN_REQUEST from:', msg.payload.name);
         this.stopGameLoop();
 
         const guestPlayer: Player = {
