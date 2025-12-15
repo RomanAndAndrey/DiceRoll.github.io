@@ -9,16 +9,10 @@ interface NetworkMessage {
   payload: any;
 }
 
-// Config: Standard Google STUN servers.
+// Config: Let PeerJS handle defaults (usually Google STUN) to avoid ICE errors with outdated configs.
 const PEER_CONFIG: PeerOptions = {
     debug: 2, 
-    secure: true,
-    config: {
-        iceServers: [
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-        ]
-    }
+    secure: true
 };
 
 // Types for our LocalStorage DB
@@ -42,12 +36,12 @@ class P2PSocketService {
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
   
-  // VERSION CHECK: v13 - Nickname Collision Protection
-  private readonly ID_PREFIX = 'cube-v13-'; 
+  // VERSION CHECK: v14 - Fix ICE & Negotiation Errors
+  private readonly ID_PREFIX = 'cube-v14-'; 
   private readonly DB_KEY = 'dc_users_db_v1';
 
   constructor() {
-    console.log('%c [System] P2P Service v13 (Collision Check) LOADED ', 'background: #f43f5e; color: white; font-weight: bold;');
+    console.log('%c [System] P2P Service v14 (Connection Fixes) LOADED ', 'background: #7c3aed; color: white; font-weight: bold;');
     this.restoreSession();
     
     // Safety: Disconnect when closing the tab
@@ -185,15 +179,13 @@ class P2PSocketService {
         console.error('[Guest] Global Connection Timeout');
         this.trigger(SocketEvents.CONNECT_ERROR, { message: 'Connection timed out. Room ID might be wrong or Host offline.' });
         this.disconnect();
-    }, 12000);
+    }, 15000);
 
     this.peer.on('open', (myId) => {
       console.log(`[Guest] Peer initialized (${myId}). Connecting to ${fullTargetId}...`);
       
-      const conn = this.peer!.connect(fullTargetId, {
-          reliable: true,
-          serialization: 'json'
-      });
+      // Removed serialization: 'json' to fix negotiation errors
+      const conn = this.peer!.connect(fullTargetId);
       
       this.conn = conn;
 
