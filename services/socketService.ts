@@ -9,16 +9,11 @@ interface NetworkMessage {
   payload: any;
 }
 
-// Config: Standard Google STUN servers.
+// FIX: Use default PeerJS config. Explicit STUN config often causes ICE failures if outdated.
+// Defaults usually fallback to Google STUN automatically and correctly.
 const PEER_CONFIG: PeerOptions = {
     debug: 2, 
-    secure: true,
-    config: {
-        iceServers: [
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-        ]
-    }
+    secure: true
 };
 
 // Types for our LocalStorage DB
@@ -42,12 +37,13 @@ class P2PSocketService {
   private gameLoopTimeout: any = null;
   private connectionTimeout: any = null;
   
-  // VERSION CHECK: v12 - Real Leaderboard & Stats (Rolled back from v14)
-  private readonly ID_PREFIX = 'cube-v12-'; 
+  // RESTORED: Stable ID prefix. 
+  // Changed to 'cube-fix-' to ensure we don't connect to broken cached sessions.
+  private readonly ID_PREFIX = 'cube-fix-'; 
   private readonly DB_KEY = 'dc_users_db_v1';
 
   constructor() {
-    console.log('%c [System] P2P Service v12 (Rolled Back) LOADED ', 'background: #10b981; color: black; font-weight: bold;');
+    console.log('%c [System] P2P Service (Restored & Fixed) ', 'background: #0ea5e9; color: white; font-weight: bold;');
     this.restoreSession();
     
     // Safety: Disconnect when closing the tab
@@ -190,10 +186,8 @@ class P2PSocketService {
     this.peer.on('open', (myId) => {
       console.log(`[Guest] Peer initialized (${myId}). Connecting to ${fullTargetId}...`);
       
-      const conn = this.peer!.connect(fullTargetId, {
-          reliable: true,
-          serialization: 'json'
-      });
+      // FIX: Removed { serialization: 'json' } to fix "Negotiation of connection failed" errors.
+      const conn = this.peer!.connect(fullTargetId);
       
       this.conn = conn;
 
@@ -285,6 +279,7 @@ class P2PSocketService {
 
   private handleHostMessage(msg: NetworkMessage) {
     if (msg.type === 'JOIN_REQUEST') {
+        // ROLLBACK: No nickname check here.
         console.log('[Host] JOIN_REQUEST from:', msg.payload.name);
         this.stopGameLoop();
 
